@@ -10,7 +10,8 @@ moves, brand-new markets, and large executed trades.
 - `python -m pip install -r requirements.txt` — install dependencies.
 - `python -m unittest discover -s tests` — run the test suite.
 - Required environment variables: `DISCORD_BOT_TOKEN` and `NEWS_API_KEY`.
-- Optional: `NEWS_LANGUAGE`, `NEWS_POLL_INTERVAL_SECONDS` (default `300`, minimum `60`),
+- Optional: `NEWS_LANGUAGE`, `MONITOR_POLL_INTERVAL_SECONDS` (whale/price/market/wallet checks, default `300`, minimum `60`),
+  `NEWS_POLL_INTERVAL_SECONDS` (news checks, default `900` to fit NewsAPI's free 100 requests/day, minimum `60`),
   `DISCORD_CHANNEL_ID` (legacy fallback channel), `DISCORD_DEV_GUILD_ID`/`DISCORD_GUILD_IDS`
   (comma-separated servers that receive instant command sync), and `STATE_DIR`.
 

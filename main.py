@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import signal
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3555,6 +3556,7 @@ class LashNewsBot(commands.Bot):
         channel_id: int | None,
         poll_interval: int,
         dev_guild_ids: list[int] | None = None,
+        news_poll_interval: int | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -3572,6 +3574,10 @@ class LashNewsBot(commands.Bot):
         ]
         self.channel_id = channel_id
         self.poll_interval = poll_interval
+        # News has its own, slower timer: a free NewsAPI key allows only 100
+        # requests a day, while whale, price, and market checks stay fast.
+        self.news_poll_interval = max(news_poll_interval or poll_interval, poll_interval)
+        self.last_news_attempt_at: float | None = None
         self.dev_guild_ids = dev_guild_ids or []
         self.seen_articles = load_seen_articles()
         self.seen_article_urls = set(self.seen_articles)
@@ -5496,6 +5502,19 @@ class LashNewsBot(commands.Bot):
             else:
                 self.poll_wakeup.clear()
 
+    def _news_due(self) -> bool:
+        """True when the news timer has elapsed since the last news attempt.
+
+        The attempt time is stamped before the fetch, so a throttled (429) or
+        failed request still waits a full news interval instead of retrying on
+        every fast monitor cycle and burning the daily quota.
+        """
+        last = getattr(self, "last_news_attempt_at", None)
+        if last is None:
+            return True
+        interval = getattr(self, "news_poll_interval", None) or self.poll_interval
+        return time.monotonic() - last >= interval
+
     @staticmethod
     def parse_retry_after(response: aiohttp.ClientResponse) -> float | None:
         raw = response.headers.get("Retry-After")
@@ -5632,6 +5651,10 @@ class LashNewsBot(commands.Bot):
                 # never pointed at a channel looked exactly like a dead task.
                 skipped.append(f"{name} (run {ALERT_CHANNEL_COMMANDS[alert]})")
                 continue
+            if alert == "news" and not self._news_due():
+                continue
+            if alert == "news":
+                self.last_news_attempt_at = time.monotonic()
             attempted += 1
             try:
                 await runner(destinations)
@@ -7546,16 +7569,24 @@ def create_bot() -> LashNewsBot:
         )
 
     try:
-        poll_interval = int(os.getenv("NEWS_POLL_INTERVAL_SECONDS", "300"))
+        poll_interval = int(os.getenv("MONITOR_POLL_INTERVAL_SECONDS", "300"))
+    except ValueError as exc:
+        raise ValueError("MONITOR_POLL_INTERVAL_SECONDS must be a whole number.") from exc
+    if poll_interval < 60:
+        raise ValueError("MONITOR_POLL_INTERVAL_SECONDS must be at least 60.")
+    try:
+        # 900 seconds is 96 requests a day, inside NewsAPI's free 100/day.
+        news_poll_interval = int(os.getenv("NEWS_POLL_INTERVAL_SECONDS", "900"))
     except ValueError as exc:
         raise ValueError("NEWS_POLL_INTERVAL_SECONDS must be a whole number.") from exc
-    if poll_interval < 60:
+    if news_poll_interval < 60:
         raise ValueError("NEWS_POLL_INTERVAL_SECONDS must be at least 60.")
 
     return LashNewsBot(
         news_api_key=news_api_key,
         channel_id=parse_channel_id(os.getenv("DISCORD_CHANNEL_ID")),
         poll_interval=poll_interval,
+        news_poll_interval=news_poll_interval,
         dev_guild_ids=parse_guild_ids(
             os.getenv("DISCORD_DEV_GUILD_ID") or os.getenv("DISCORD_GUILD_IDS")
         ),

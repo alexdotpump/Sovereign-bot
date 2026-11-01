@@ -412,5 +412,84 @@ class MonitorCycleIsolationTests(MonitorTestCase):
         self.assertIn("upstream exploded", bot.last_poll_error)
 
 
+class NewsTimerTests(MonitorTestCase):
+    """News runs on its own slower timer so the free NewsAPI quota lasts."""
+
+    async def _cycle_bot(self, calls):
+        bot = await self._bot(channel_id=555)
+
+        def runner(name):
+            async def run(destinations):
+                calls.append(name)
+            return run
+
+        bot.run_news_cycle = runner("news")
+        bot.run_new_market_cycle = runner("markets")
+        bot.run_price_cycle = runner("price")
+        bot.run_whale_cycle = runner("whale")
+        bot.run_wallet_cycle = runner("wallet")
+
+        async def destinations_by_category():
+            return {category: {"1": FakeChannel()} for category in main.ALERT_TYPES}
+
+        bot.get_alert_destinations = destinations_by_category
+
+        class FakeSession:
+            async def close(self):
+                return None
+
+        bot.news_session = FakeSession()
+        return bot
+
+    async def test_news_waits_for_its_interval_while_others_keep_running(self):
+        calls: list[str] = []
+        bot = await self._cycle_bot(calls)
+        bot.poll_interval = 300
+        bot.news_poll_interval = 900
+        await bot.run_monitor_cycle()
+        await bot.run_monitor_cycle()
+        self.assertEqual(calls.count("news"), 1)
+        self.assertEqual(calls.count("whale"), 2)
+        self.assertEqual(calls.count("price"), 2)
+
+    async def test_news_runs_again_once_its_interval_has_passed(self):
+        calls: list[str] = []
+        bot = await self._cycle_bot(calls)
+        bot.news_poll_interval = 900
+        await bot.run_monitor_cycle()
+        bot.last_news_attempt_at -= 901
+        await bot.run_monitor_cycle()
+        self.assertEqual(calls.count("news"), 2)
+
+    async def test_a_failed_news_fetch_still_waits_a_full_interval(self):
+        calls: list[str] = []
+        bot = await self._cycle_bot(calls)
+
+        async def throttled(destinations):
+            calls.append("news")
+            raise RuntimeError("HTTP 429")
+
+        bot.run_news_cycle = throttled
+        bot.news_poll_interval = 900
+        await bot.run_monitor_cycle()
+        await bot.run_monitor_cycle()
+        self.assertEqual(calls.count("news"), 1)
+
+    def test_intervals_come_from_separate_settings(self):
+        old = {k: os.environ.get(k) for k in ("MONITOR_POLL_INTERVAL_SECONDS", "NEWS_POLL_INTERVAL_SECONDS")}
+        try:
+            os.environ.pop("MONITOR_POLL_INTERVAL_SECONDS", None)
+            os.environ.pop("NEWS_POLL_INTERVAL_SECONDS", None)
+            bot = main.create_bot()
+            self.assertEqual(bot.poll_interval, 300)
+            self.assertEqual(bot.news_poll_interval, 900)
+        finally:
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 if __name__ == "__main__":
     unittest.main()
