@@ -29,10 +29,12 @@ POLYMARKET_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 POLYMARKET_SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
 POLYMARKET_DATA_API_URL = "https://data-api.polymarket.com"
 POLYMARKET_TRADES_URL = f"{POLYMARKET_DATA_API_URL}/v2/trades"
-# Per-wallet activity feed on the same Data API the whale monitor already uses.
-# Verified live: /activity?user=<address> returns TRADE/SPLIT/MERGE/REDEEM rows
-# carrying usdcSize (transaction value), price, side, market title and tx hash.
-POLYMARKET_WALLET_ACTIVITY_URL = f"{POLYMARKET_DATA_API_URL}/activity"
+# Per-wallet activity feed on the same Data API v2 the whale monitor uses.
+# Polymarket retired Data API v1 on Nov 2 2026 (the bare /activity route now
+# answers HTTP 410). Verified live: /v2/activity?user=<address> returns
+# {"data": [...]} with snake_case TRADE/SPLIT/MERGE/REDEEM rows carrying
+# usdc_size, price, side, title and transaction_hash.
+POLYMARKET_WALLET_ACTIVITY_URL = f"{POLYMARKET_DATA_API_URL}/v2/activity"
 POLYMARKET_MARKET_PAGE = "https://polymarket.com/market"
 # Polymarket's CLOB price-history endpoint, used by /chart.
 POLYMARKET_PRICE_HISTORY_URL = "https://clob.polymarket.com/prices-history"

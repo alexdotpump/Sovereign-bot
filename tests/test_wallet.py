@@ -3,7 +3,7 @@
 Every test here runs offline: the Polymarket activity feed is replaced by a
 deterministic in-memory fake, so these are simulation tests and not live
 provider checks. The live endpoint shape they model was verified against
-``https://data-api.polymarket.com/activity?user=<address>``.
+``https://data-api.polymarket.com/v2/activity?user=<address>``.
 """
 
 import asyncio
@@ -606,6 +606,35 @@ class WalletChannelTests(WalletTestCase):
         self.assertIn("wallet", settings["alerts"])
         self.assertIn("wallet", settings["channels"])
         self.assertEqual(main.ALERT_CHANNEL_COMMANDS["wallet"], "/set-wallet-alerts")
+
+
+
+class WalletActivityEndpointTests(unittest.TestCase):
+    def test_wallet_activity_uses_data_api_v2(self):
+        # Data API v1 /activity was retired on Nov 2 2026 and answers HTTP 410.
+        self.assertEqual(
+            main.POLYMARKET_WALLET_ACTIVITY_URL,
+            "https://data-api.polymarket.com/v2/activity",
+        )
+        self.assertTrue(main.POLYMARKET_TRADES_URL.endswith("/v2/trades"))
+
+    def test_v2_snake_case_activity_row_is_parsed(self):
+        row = {
+            "type": "TRADE",
+            "usdc_size": 5.29,
+            "size": 5.5,
+            "price": 0.96,
+            "transaction_hash": "0xabc",
+            "token_id": "123",
+            "side": "BUY",
+            "timestamp": 1794031533,
+            "slug": "some-market",
+            "event_slug": "some-event",
+        }
+        self.assertEqual(main.wallet_activity_type(row), "TRADE")
+        self.assertAlmostEqual(main.wallet_event_value(row), 5.29)
+        self.assertIsNotNone(main.wallet_activity_key(row))
+        self.assertTrue(main.wallet_event_market_url(row).endswith("/some-market"))
 
 
 if __name__ == "__main__":
