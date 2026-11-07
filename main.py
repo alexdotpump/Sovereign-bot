@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 import discord
@@ -1798,6 +1798,62 @@ def fit_embed_text(value: Any, limit: int) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+EMBED_URL_MAX_LENGTH = 2048
+_EMBED_URL_SAFE_CHARS = ":/?#[]@!$&'()*+,;=%~-._"
+
+
+def safe_embed_url(value: Any, *, allow_attachment: bool = False) -> str | None:
+    """Return a URL Discord will accept in an embed, or None to drop it.
+
+    Discord rejects the whole message ("Not a well formed URL") when one image
+    or link URL is malformed, so a single bad market icon would silently drop
+    the alert. Spaces and non-ASCII are percent-encoded; anything that still
+    is not a plain http(s) URL with a host is dropped instead of sent.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url:
+        return None
+    if allow_attachment and url.startswith("attachment://"):
+        return url
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        return None
+    url = quote(url, safe=_EMBED_URL_SAFE_CHARS)
+    if len(url) > EMBED_URL_MAX_LENGTH:
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return None
+    del port
+    if parts.scheme not in ("http", "https"):
+        return None
+    host = parts.hostname or ""
+    if not host or "." not in host or host.startswith(".") or host.endswith("."):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+        return None
+    return url
+
+
+def strip_embed_urls(embed: discord.Embed) -> discord.Embed:
+    """Remove every image and link URL from an embed (the retry fallback)."""
+    embed.url = None
+    embed.set_thumbnail(url=None)
+    image_url = embed.image.url if embed.image else None
+    if not (isinstance(image_url, str) and image_url.startswith("attachment://")):
+        embed.set_image(url=None)
+    footer = embed.footer
+    if footer is not None and footer.text:
+        embed.set_footer(text=footer.text)
+    author = embed.author
+    if author is not None and author.name:
+        embed.set_author(name=author.name)
+    return embed
+
+
 def sanitize_embed(embed: discord.Embed) -> discord.Embed:
     """Clamp a built embed to Discord's hard limits so a long alert still posts.
 
@@ -1826,16 +1882,23 @@ def sanitize_embed(embed: discord.Embed) -> discord.Embed:
     if footer is not None and footer.text:
         embed.set_footer(
             text=fit_embed_text(footer.text, EMBED_FOOTER_LIMIT),
-            icon_url=footer.icon_url,
+            icon_url=safe_embed_url(footer.icon_url),
         )
 
     author = embed.author
     if author is not None and author.name:
         embed.set_author(
             name=fit_embed_text(author.name, EMBED_AUTHOR_LIMIT),
-            url=author.url,
-            icon_url=author.icon_url,
+            url=safe_embed_url(author.url),
+            icon_url=safe_embed_url(author.icon_url),
         )
+
+    if embed.url:
+        embed.url = safe_embed_url(embed.url)
+    if embed.thumbnail and embed.thumbnail.url:
+        embed.set_thumbnail(url=safe_embed_url(embed.thumbnail.url))
+    if embed.image and embed.image.url:
+        embed.set_image(url=safe_embed_url(embed.image.url, allow_attachment=True))
 
     return embed
 
@@ -4115,7 +4178,29 @@ class LashNewsBot(commands.Bot):
             return True
         except asyncio.CancelledError:
             raise
-        except discord.HTTPException:
+        except discord.HTTPException as error:
+            if getattr(error, "code", None) == 50035 and "url" in str(error).lower():
+                # One malformed image or link URL rejects the whole alert;
+                # resend it without any URLs rather than lose it.
+                logger.warning(
+                    "Discord rejected an embed URL in channel %s (server %s): %s. "
+                    "Retrying without images. thumbnail=%r image=%r",
+                    channel.id,
+                    guild_id,
+                    str(error).splitlines()[-1],
+                    embed.thumbnail.url if embed.thumbnail else None,
+                    embed.image.url if embed.image else None,
+                )
+                try:
+                    await channel.send(
+                        embed=strip_embed_urls(embed),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return True
+                except asyncio.CancelledError:
+                    raise
+                except discord.HTTPException:
+                    pass
             logger.exception(
                 "Could not post an alert to channel %s in server %s.",
                 channel.id,
@@ -5910,8 +5995,8 @@ class LashNewsBot(commands.Bot):
                 value=discord.utils.format_dt(end_date, style="f"),
                 inline=True,
             )
-        image = market.get("icon") or market.get("image")
-        if isinstance(image, str) and image.startswith("https://"):
+        image = safe_embed_url(market.get("icon")) or safe_embed_url(market.get("image"))
+        if image is not None:
             embed.set_thumbnail(url=image)
         embed.set_footer(text="Market Intel • Sovereign Predicts")
         return embed

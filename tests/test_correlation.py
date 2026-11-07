@@ -874,3 +874,88 @@ class NewsCycleIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmbedUrlSafetyTests(unittest.IsolatedAsyncioTestCase):
+    """A malformed image URL must never make Discord drop a whole alert."""
+
+    def test_safe_embed_url_keeps_good_urls(self):
+        url = "https://polymarket-upload.s3.us-east-2.amazonaws.com/icon.png"
+        self.assertEqual(main.safe_embed_url(url), url)
+
+    def test_safe_embed_url_encodes_spaces_and_unicode(self):
+        fixed = main.safe_embed_url(" https://cdn.example.com/my icon é.png ")
+        self.assertEqual(fixed, "https://cdn.example.com/my%20icon%20%C3%A9.png")
+
+    def test_safe_embed_url_drops_malformed_values(self):
+        for bad in (
+            None, "", "   ", "icon.png", "https://", "https:///x.png",
+            "ftp://example.com/x.png", "https://bad host/x.png",
+            "https://example.com/x\n.png", "https://localhost/x.png",
+            "https://example.com:99999/x.png",
+            "https://example.com/" + "a" * 3000,
+        ):
+            self.assertIsNone(main.safe_embed_url(bad), bad)
+
+    def test_market_embed_skips_a_bad_icon_and_falls_back_to_image(self):
+        bot = main.LashNewsBot.__new__(main.LashNewsBot)
+        embed = bot.make_market_embed(
+            {
+                "question": "Will it happen?",
+                "slug": "will-it-happen",
+                "icon": "https://",
+                "image": "https://cdn.example.com/good.png",
+            }
+        )
+        self.assertEqual(embed.thumbnail.url, "https://cdn.example.com/good.png")
+        embed = bot.make_market_embed(
+            {"question": "Q?", "slug": "q", "icon": "not a url", "image": ""}
+        )
+        self.assertIsNone(embed.thumbnail.url)
+
+    def test_sanitize_embed_drops_bad_image_and_icon_urls(self):
+        embed = discord.Embed(title="T")
+        embed.set_thumbnail(url="https://")
+        embed.set_image(url="attachment://chart.png")
+        embed.set_author(name="A", icon_url="nope")
+        main.sanitize_embed(embed)
+        self.assertIsNone(embed.thumbnail.url)
+        self.assertEqual(embed.image.url, "attachment://chart.png")
+        self.assertIsNone(embed.author.icon_url)
+
+    async def test_send_embed_retries_without_urls_when_discord_rejects_one(self):
+        class Response:
+            status = 400
+            reason = "Bad Request"
+
+        class RejectingChannel:
+            id = 555
+
+            def __init__(self):
+                self.attempts = []
+
+            async def send(self, *, embed=None, allowed_mentions=None):
+                self.attempts.append(embed.thumbnail.url)
+                if embed.thumbnail.url:
+                    raise discord.HTTPException(
+                        Response(),
+                        {
+                            "code": 50035,
+                            "message": "Invalid Form Body",
+                            "errors": {"embeds": {"0": {"thumbnail": {"url": {
+                                "_errors": [{"code": "URL_TYPE_INVALID_URL",
+                                             "message": "Not a well formed URL."}]
+                            }}}}},
+                        },
+                    )
+
+        bot = main.LashNewsBot.__new__(main.LashNewsBot)
+        channel = RejectingChannel()
+        embed = discord.Embed(title="New Market")
+        embed.set_thumbnail(url="https://cdn.example.com/weird.png")
+        with self.assertLogs(main.logger, level="WARNING"):
+            posted = await bot.send_embed(channel, embed, "1")
+        self.assertTrue(posted)
+        self.assertEqual(
+            channel.attempts, ["https://cdn.example.com/weird.png", None]
+        )
